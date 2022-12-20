@@ -1,0 +1,203 @@
+version: "3.8"
+
+volumes:
+  watch-party-postgres-data:
+    external: true
+  watch-party-cache:
+    external: true
+
+services:
+  postgres:
+    container_name: postgres
+    stdin_open: true
+    tty: true
+    build:
+      context: ./relational-data
+      dockerfile: ./Dockerfile.dev
+    volumes:
+      - watch-party-postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_MULTIPLE_DATABASES=watchlists,watchparties,accounts,movies
+      - POSTGRES_PASSWORD=test-databases
+    ports:
+      - 15432:5432
+
+  cache:
+    image: redis:7.0.5-alpine
+    restart: on-failure:5
+    container_name: cache
+    ports:
+      - '6379:6379'
+      - '12345:8001'
+    command: redis-server --save 20 1 --loglevel warning --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - watch-party-cache:/data
+
+  movie-search:
+    container_name: movie-search
+    stdin_open: true
+    tty: true
+    depends_on:
+      - postgres
+    build:
+      context: ./api/movie_search
+      dockerfile: ./Dockerfile.dev
+    ports:
+      - "8005:5000"
+    volumes:
+      - ./api/movie_search:/app
+    environment:
+      - TMDB_API_KEY_V3=${TMDB_API_KEY_V3}
+      - TMDB_API_KEY_V4=${TMDB_API_KEY_V4}
+
+  movies:
+    container_name: movies
+    stdin_open: true
+    tty: true
+    build:
+        context: ./movies-microservice
+        dockerfile: ./Dockerfile.dev
+    depends_on:
+      - postgres
+      - cache
+    ports:
+        - "8004:8004"
+    volumes:
+        - ./movies-microservice:/app
+    environment:
+        DATABASE_URL: postgresql://movies:password@postgres:5432/movies
+        WAIT_HOSTS: postgres:5432
+        TMDB_API_KEY_V3: ${TMDB_API_KEY_V3}
+        TMDB_API_KEY_V4: ${TMDB_API_KEY_V4}
+        REDIS_HOST: cache
+        REDIS_PORT: 6379
+        REDIS_PASSWORD: ${REDIS_PASSWORD}
+        GHI_URL: http://localhost:3000
+        WATCHLISTS_URL: http://localhost:8002
+        WATCH_PARTIES_URL: http://localhost:8001
+
+  watch-parties:
+    container_name: watch-parties
+    stdin_open: true
+    tty: true
+    build:
+        context: ./watch-parties-microservice
+        dockerfile: ./Dockerfile.dev
+    depends_on:
+      - postgres
+    ports:
+        - "8003:8003"
+    volumes:
+        - ./watch-parties-microservice:/app
+    environment:
+        DATABASE_URL: postgresql://watchparties:password@postgres:5432/watchparties
+        WAIT_HOSTS: postgres:5432, rabbitmq:5672
+        MOVIES_HOST: movies:8004
+        WATCHLISTS_HOST: watchlists:8002
+        GHI_URL: http://localhost:3000
+
+  watchlists:
+    container_name: watchlists
+    stdin_open: true
+    tty: true
+    build:
+        context: ./watchlists-microservice
+        dockerfile: ./Dockerfile.dev
+    depends_on:
+      - postgres
+      - rabbitmq
+    ports:
+        - "8002:8002"
+    volumes:
+        - ./watchlists-microservice:/app
+    environment:
+        DATABASE_URL: postgresql://watchlists:password@postgres:5432/watchlists
+        WAIT_HOSTS: postgres:5432, rabbitmq:5672
+        MOVIES_HOST: movies:8004
+        WATCH_PARTIES_HOST: watchparties:8003
+        GHI_URL: http://localhost:3000
+
+  accounts:
+    container_name: accounts
+    stdin_open: true
+    tty: true
+    build:
+        context: ./accounts-microservice
+        dockerfile: ./Dockerfile.dev
+    depends_on:
+      - postgres
+      - rabbitmq
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./accounts-microservice:/app
+    environment:
+      DATABASE_URL: postgresql://accounts:password@postgres:5432/accounts
+      WAIT_HOSTS: postgres:5432, rabbitmq:5672
+      GHI_URL: http://localhost:3000
+
+  ghi:
+    container_name: ghi
+    stdin_open: true
+    tty: true
+    image: node:lts-bullseye
+    depends_on:
+      - postgres
+    command: /bin/bash run.sh
+    working_dir: /app
+    volumes:
+      - ./ghi:/app
+    ports:
+      - "3000:3000"
+    environment:
+      HOST_OS: ${OS}
+      NODE_ENV: development
+      HOST: "0.0.0.0"
+      REACT_APP_ACCOUNTS: http://localhost:8001
+      REACT_APP_WATCHLISTS: http://localhost:8002
+      REACT_APP_WATCH_PARTIES: http://localhost:8003
+      REACT_APP_MOVIES: http://localhost:8004
+      REACT_APP_MOVIE_SEARCH: http://localhost:8005
+      PUBLIC_URL: http://localhost:3000
+
+  watchlists-user-consumer:
+    container_name: watchlists-user-consumer
+    stdin_open: true
+    tty: true
+    build:
+      context: ./watchlists-microservice
+      dockerfile: ./Dockerfile.user_consumer.dev
+    volumes:
+      - ./watchlists-microservice:/app
+    depends_on:
+      - rabbitmq
+      - postgres
+      - watchlists
+    environment:
+      DATABASE_URL: postgresql://watchlists:password@postgres:5432/watchlists
+      WAIT_HOSTS: postgres:5432, rabbitmq:5672
+      WAIT_TIMEOUT: 180
+
+  watch-parties-user-consumer:
+    container_name: watch-parties-user-consumer
+    stdin_open: true
+    tty: true
+    build:
+      context: ./watch-parties-microservice
+      dockerfile: ./Dockerfile.user_consumer.dev
+    volumes:
+      - ./watch-parties-microservice:/app
+    depends_on:
+      - rabbitmq
+      - postgres
+      - watch-parties
+    environment:
+      DATABASE_URL: postgresql://watchparties:password@postgres:5432/watchparties
+      WAIT_HOSTS: postgres:5432, rabbitmq:5672
+      WAIT_TIMEOUT: 180
+
+  rabbitmq:
+    container_name: rabbitmq
+    stdin_open: true
+    tty: true
+    image: rabbitmq:3.11

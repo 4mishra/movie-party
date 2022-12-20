@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+# This script runs linting and unit tests for all microservices.
+# Note: Make sure all watch party containers are running.
+
+# Run unit tests. Provided the tests run successfully, the script will complete regardless of passing or failing.
+if [ -z `docker-compose ps -q movie-search` ] || [ -z `docker ps -q --no-trunc | grep $(docker-compose ps -q movie-search)` ]; then
+    echo "Failed to run movie-search unit tests. Exiting script."
+    exit 1
+else
+    echo "Running movie-search microservice unit tests..."
+    docker compose exec movie-search pytest
+    echo "Running movie-search microservice linting tests..."
+    docker compose exec movie-search black .
+    docker compose exec movie-search flake8 .
+fi
+
+microservicesArray=("watchlists" "movies" "watch-parties" "accounts")
+for i in ${!microservicesArray[@]}; do
+  retries=5
+  appname=${microservicesArray[$i]}
+  # Run unit tests for each microservice. Provided the tests run successfully, the script will complete regardless of passing or failing.
+  if [ -z `docker-compose ps -q $appname` ] || [ -z `docker ps -q --no-trunc | grep $(docker-compose ps -q $appname)` ]; then
+    echo "Failed to run $appname unit tests. Exiting script."
+    exit 1
+  else
+    echo "Running $appname microservice unit tests..."
+    docker compose exec $appname python manage.py test
+    sleep 1
+    echo "Running $appname microservice linting tests..."
+    docker compose exec $appname black .
+    docker compose exec $appname flake8 .
+  fi
+done
+
+echo "All tests complete."

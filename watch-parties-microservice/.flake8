@@ -1,0 +1,4 @@
+[flake8]
+exclude=**/settings.py,**/migrations/**
+ignore=E402,W503,E731
+max-line-length = 88

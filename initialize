@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+
+# If there is no .env file in repo, exit script
+if [[ ! -f ./.env ]]
+then
+    cp .exampleenv .env
+    echo "An .env file was not detected in your repository and has been created for you. Place your TMDB_API_KEY_V3 value in the file and rerun this script."
+    exit 1
+fi
+clear
+echo "Welcome to Watch Party!"
+sleep 1
+
+USERNAME=""
+EMAIL=""
+PASSWORD=""
+while true; do
+    read -p "Do you wish to override the default username, email, and password for the admin account? (y/n): " yn
+    case $yn in
+        [Yy]* )
+          echo "Enter desired username or leave blank to use default 'admin': ";
+          read USERNAME;
+          echo "Enter desired email or leave blank to use default '$USERNAME@watchparty.com': ";
+          read EMAIL;
+          echo "Enter desired password or leave blank to use default 'password': ";
+          read -s PASSWORD;
+          break;;
+        [Nn]* )
+        break;;
+        * ) echo "Please answer yes or no.";;
+    esac
+done
+
+if [[ "$USERNAME" == "" ]]; then
+  USERNAME="admin"
+fi
+if [[ "$PASSWORD" == "" ]]; then
+  PASSWORD="password"
+fi
+if [[ "$EMAIL" == "" ]]; then
+  EMAIL="$USERNAME@watchparty.com"
+fi
+
+clear
+
+echo "Your username: '$USERNAME'"
+echo "Your email: '$EMAIL'"
+echo "Your password: '$PASSWORD'"
+sleep 3
+
+echo "Let's get started. This script will take 4 or 5 minutes so feel free to grab a cup of coffee!"
+sleep 2
+
+# USERNAME=${1:-admin}
+# PASSWORD=${2:-password}
+# EMAIL=${3:-$USERNAME@watchparty.com}
+
+# Stop watch party containers, remove volumes and create new volumes.
+echo "Removing any existing Watch Party Docker volumes."
+docker compose down --rmi all -v --remove-orphans
+docker volume remove watch-party-postgres-data
+docker volume remove watch-party-cache
+docker volume create watch-party-postgres-data
+docker volume create watch-party-cache
+echo "New Watch Party Docker volumes created successfully!"
+
+# Create new docker images without using cache.
+if [[ $(uname -p) == 'arm' ]]; then
+    echo "M1 Mac detected. Creating linux based Docker images (no cache)."
+    DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build -q
+else
+    echo "M1 Mac not detected. Creating Docker images (no cache)."
+    docker compose build -q --no-cache
+fi
+echo "Docker image build successful!"
+
+# Run new containers.
+docker compose up -d --quiet-pull
+
+# Attempt to create superuser account. If failure, it will try again up to 5 times.
+
+microservicesArray=("watchlists" "movies" "watch-parties" "accounts")
+for i in ${!microservicesArray[@]}; do
+  retries=5
+  name=${microservicesArray[$i]}
+  appname="$name-microservice"
+  current=$(( $i + 1 ))
+  echo "microservice $current/${#microservicesArray[@]}"
+  while (( retries > 0 )); do
+    sleep 7
+    echo "Attempting to create superuser account for '$appname.'"
+    if [[ "$name" == "accounts" ]]; then
+      docker compose exec $name python manage.py shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser_and_publish('$USERNAME', '$EMAIL', '$PASSWORD')" && break
+    else
+      docker compose exec $name python manage.py shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('$USERNAME', '$EMAIL', '$PASSWORD')" && break
+    fi
+    echo "Failed to create superuser account for '$appname'. Trying again."
+    (( retries -- ))
+  done
+  if (( retries == 0 )); then
+    echo "Failed 5 attempts to create superuser account for '$appname'. Exiting script."
+    exit 1
+  else
+    echo "Successfully created superuser account in '$appname' with username: '$USERNAME' && password: '$PASSWORD' && emal: '$EMAIL'."
+    if [[ "$name" == "watchlists" ]]; then
+      docker compose exec $name python manage.py loaddata movies_app/fixtures/genres.json
+      echo "Populated database with Genres."
+    fi
+  fi
+done
+
+sleep 5
+
+# Run tests. Provided the tests run successfully, the script will complete regardless of passing or failing.
+./test
+sleep 1
+
+echo "Preparing ghi..."
+for pc in $(seq 1 99); do
+    echo -ne "$pc%\033[0K\r"
+    sleep .45
+done
+echo "100%"
+
+# Open browser to http://localhost:3000/testhome
+if [[ -z `docker-compose ps -q ghi` ]] || [[ -z `docker ps -q --no-trunc | grep $(docker-compose ps -q ghi)` ]]; then
+    echo "ghi service not running. Exiting."
+    exit 1
+else
+    echo "ghi loaded."
+    sleep 1
+    echo "Remember, a superuser account has been created for each django microservice with the username: '$USERNAME' && password: '$PASSWORD'"
+    sleep 2
+    echo "Initialize script completed successfully. Your browser will open a new tab to http://localhost:3000/testhome in 5 seconds."
+    for n in $(seq 5 2); do
+        echo -ne "$n seconds\033[0K\r"
+        sleep 1
+    done
+    echo -ne "1 second\033[0K\r"
+    sleep 1
+    echo  "Happy coding!"
+    sleep 1
+    open "http://localhost:3000/testhome" || exlplorer "http://localhost:3000/testhome"
+fi
